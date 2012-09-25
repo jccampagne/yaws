@@ -1105,7 +1105,7 @@ acceptor0(GS, Top) ->
 %%% Internal functions
 %%%----------------------------------------------------------------------
 
-aloop(CliSock, {IP,Port}, GS, Num) ->
+aloop(CliSock, {IP,Port}=IPPort, GS, Num) ->
     case yaws_trace:get_type(GS#gs.gconf) of
         undefined ->
             ok;
@@ -1135,24 +1135,39 @@ aloop(CliSock, {IP,Port}, GS, Num) ->
             {Req, H} = fix_abs_uri(Req0, H0),
             ?Debug("{Req, H} = ~p~n", [{Req, H}]),
             SC = pick_sconf(GS#gs.gconf, H, GS#gs.group),
-            ?Debug("SC: ~s", [?format_record(SC, sconf)]),
-            ?TC([{record, SC, sconf}]),
-            ?Debug("Headers = ~s~n", [?format_record(H, headers)]),
-            ?Debug("Request = ~s~n", [?format_record(Req, http_request)]),
-            run_trace_filter(GS, IP, Req, H),
-            put(outh, #outh{}),
-            put(sc, SC),
-            yaws_stats:hit(),
-            check_keepalive_maxuses(GS, Num),
-            Call = case yaws_shaper:check(SC, IP) of
-                       allow ->
-                           call_method(Req#http_request.method,CliSock,
-                                       {IP,Port},Req,H);
-                       {deny, Status, Msg} ->
-                           deliver_xxx(CliSock, Req, Status, Msg)
-                   end,
-            Call2 = fix_keepalive_maxuses(Call),
-            handle_method_result(Call2, CliSock, {IP,Port}, GS, Req, H, Num);
+            DispatchResult = case SC#sconf.dispatch_mod of
+                                 undefined ->
+                                     continue;
+                                 DispatchMod ->
+                                     Arg = make_arg(SC, CliSock, H, Req, undefined),
+                                     DispatchMod:out(Arg)
+                             end,
+            case DispatchResult of
+                done ->
+                    aloop(CliSock, IPPort, GS, Num+1);
+                close ->
+                    gen_tcp:close(CliSock),
+                    {ok, Num+1};
+                continue ->
+                    ?Debug("SC: ~s", [?format_record(SC, sconf)]),
+                    ?TC([{record, SC, sconf}]),
+                    ?Debug("Headers = ~s~n", [?format_record(H, headers)]),
+                    ?Debug("Request = ~s~n", [?format_record(Req, http_request)]),
+                    run_trace_filter(GS, IP, Req, H),
+                    put(outh, #outh{}),
+                    put(sc, SC),
+                    yaws_stats:hit(),
+                    check_keepalive_maxuses(GS, Num),
+                    Call = case yaws_shaper:check(SC, IP) of
+                               allow ->
+                                   call_method(Req#http_request.method,CliSock,
+                                               IPPort,Req,H);
+                               {deny, Status, Msg} ->
+                                   deliver_xxx(CliSock, Req, Status, Msg)
+                           end,
+                    Call2 = fix_keepalive_maxuses(Call),
+                    handle_method_result(Call2, CliSock, IPPort, GS, Req, H, Num)
+            end;
         closed ->
             case yaws_trace:get_type(GS#gs.gconf) of
                 undefined -> ok;
@@ -1569,6 +1584,8 @@ no_body_method(CliSock, IPPort, Req, Head) ->
 
 make_arg(CliSock0, IPPort, Head, Req, Bin) ->
     SC = get(sc),
+    make_arg(SC, CliSock0, IPPort, Head, Req, Bin).
+make_arg(SC, CliSock0, IPPort, Head, Req, Bin) ->
     CliSock = case yaws:is_ssl(SC) of
                   nossl ->
                       CliSock0;
