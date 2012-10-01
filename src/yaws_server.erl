@@ -2567,12 +2567,20 @@ del_old_files(_GC, [{_FileAtom, spec, _Mtime1, Spec, _}]) ->
       end, Spec).
 
 
+unwrap_clisock(CliSock) when is_port(CliSock) -> CliSock;
+unwrap_clisock(CliSock0) ->
+    case CliSock0 of
+        {sslsocket, _, _} -> CliSock0;
+        {ssl, CliSock} -> CliSock
+    end.
+
 get_client_data(CliSock, Len, SSlBool) ->
     get_client_data(CliSock, Len, [], SSlBool).
 
 get_client_data(_CliSock, 0, Bs, _SSlBool) ->
     list_to_binary(Bs);
-get_client_data(CliSock, Len, Bs, SSlBool) ->
+get_client_data(CliSock0, Len, Bs, SSlBool) ->
+    CliSock = unwrap_clisock(CliSock0),
     case yaws:cli_recv(CliSock, Len, SSlBool) of
         {ok, B} ->
             get_client_data(CliSock, Len-size(B), [Bs,B], SSlBool);
